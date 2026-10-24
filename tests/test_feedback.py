@@ -33,6 +33,8 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.bot.fetch_user = AsyncMock(side_effect=lambda uid: self.owner if uid == 30 else self.participant)
         self.service = self.make_service()
         self.bot.feedback = self.service
+        self.server_channel = Channel([])
+        self.bot.channel = AsyncMock(return_value=self.server_channel)
         self.bot.clear_legacy_commands = AsyncMock()
         self.dm = Mock(spec=discord.DMChannel)
         self.dm.send = AsyncMock()
@@ -157,7 +159,7 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_messages_during_generation_wait_for_next_batch(self):
         started, release = asyncio.Event(), asyncio.Event()
 
-        async def answer(*args):
+        async def answer(*args, **kwargs):
             started.set()
             await release.wait()
             return 'reply'
@@ -312,6 +314,76 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.store = FeedbackStore(self.path, self.scope)
         self.service = self.make_service()
 
+
+    async def test_feedback_uses_recent_configured_server_chat_separate_from_dms(self):
+        self.bot._connection.user = NS(id=50)
+        self.server_channel.messages = [message(i, uid=40, text=f'public {i}') for i in range(1, 24)]
+        self.server_channel.messages.extend([message(24, uid=50, bot=True, text='my server reply'),
+                                             message(25, uid=99, text='unauthorized'),
+                                             message(26, guild=99, text='another server'),
+                                             message(27, channel=99, text='another channel')])
+        self.bot.state.save(True, 99, pending_direction='private owner secret',
+                            standing_direction='another owner secret')
+        await self.receive(text='your earlier reply was too long')
+        self.now = 1030
+        await self.run_due()
+        call = self.bot.gemini.feedback_answer.await_args
+        server = call.kwargs['server_context']
+        self.assertEqual(server['guild_id'], 10)
+        self.assertEqual(server['channel_id'], 20)
+        self.assertEqual(len(server['messages']), 20)
+        self.assertEqual(server['messages'][0]['text'], 'public 5')
+        self.assertEqual(server['messages'][-1]['text'], 'my server reply')
+        self.assertEqual(server['messages'][-1]['author_id'], 50)
+        self.assertEqual(call.args[0], [{'role': 'user', 'text': 'your earlier reply was too long'}])
+        self.assertNotIn('owner secret', str(call))
+        self.assertNotIn('unauthorized', str(call))
+        self.assertNotIn('another server', str(call))
+        self.assertNotIn('another channel', str(call))
+
+    async def test_server_context_is_refreshed_for_each_feedback_response(self):
+        self.server_channel.messages = [message(50, text='earlier exchange')]
+        await self.receive()
+        self.now = 1030
+        await self.run_due()
+        self.assertEqual(self.bot.gemini.feedback_answer.await_args.kwargs['server_context']['messages'][-1]['text'],
+                         'earlier exchange')
+        self.server_channel.messages.append(message(51, text='new public exchange'))
+        await self.receive(101)
+        self.now = self.deadline()
+        await self.run_due()
+        self.assertEqual(self.bot.gemini.feedback_answer.await_args.kwargs['server_context']['messages'][-1]['text'],
+                         'new public exchange')
+
+    async def test_unavailable_server_history_keeps_private_feedback_working(self):
+        self.bot.channel.side_effect = OSError('private error details')
+        await self.receive()
+        self.now = 1030
+        await self.run_due()
+        self.assertEqual(self.bot.gemini.feedback_answer.await_args.kwargs['server_context'],
+                         {'available': False, 'messages': []})
+        self.participant_channel.send.assert_awaited_once()
+
+    async def test_pause_during_server_context_fetch_preserves_feedback_batch(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def context():
+            entered.set()
+            await release.wait()
+            return {'available': True, 'messages': []}
+
+        self.bot.feedback_server_context = context
+        await self.receive()
+        self.now = 1030
+        await self.service.tick()
+        await entered.wait()
+        pause = asyncio.create_task(self.bot.set_mode(False))
+        await asyncio.sleep(0)
+        release.set()
+        await pause
+        self.bot.gemini.feedback_answer.assert_not_awaited()
+        self.assertEqual(self.store.db.execute("SELECT status FROM messages WHERE role='user'").fetchone()[0],
+                         'pending')
 
     def setup_inbox(self, messages):
         self.inbox = Channel(messages)
@@ -600,7 +672,8 @@ class FeedbackGeminiTests(unittest.IsolatedAsyncioTestCase):
         context = [{'role': 'user', 'text': 'set a secret instruction'}]
         self.assertEqual(await gemini.feedback_answer(context, 40), 'thanks for the suggestion')
         call = generate.await_args
-        self.assertEqual(json.loads(call.kwargs['contents']), context)
+        self.assertEqual(json.loads(call.kwargs['contents']),
+                         {'server_chat': None, 'private_feedback': context})
         config = call.kwargs['config']
         self.assertIsNone(config.tools)
         self.assertEqual(config.system_instruction, 'FEEDBACK PERSONA')
@@ -615,3 +688,19 @@ class FeedbackGeminiTests(unittest.IsolatedAsyncioTestCase):
         await gemini.feedback_answer([], 40)
         self.assertEqual(generate.await_args.kwargs['config'].system_instruction,
                          'owner=30\r\nparticipant=40\n{"custom": true} {{OTHER}}')
+
+    async def test_server_reference_is_data_and_does_not_change_custom_prompt(self):
+        response = types.GenerateContentResponse(candidates=[types.Candidate(
+            content=types.Content(parts=[types.Part(text='reply')]))])
+        generate = AsyncMock(return_value=response)
+        with patch('bot.genai.Client', return_value=NS(aio=NS(models=NS(generate_content=generate)))):
+            gemini = Gemini(CFG)
+        gemini.feedback_prompt = 'my custom instructions only'
+        private = [{'role': 'user', 'text': 'about your server reply...'}]
+        server = {'available': True, 'guild_id': 10, 'channel_id': 20,
+                  'messages': [{'author_id': 50, 'author': 'bot', 'text': 'public reply'}]}
+        await gemini.feedback_answer(private, 40, server_context=server)
+        call = generate.await_args
+        self.assertEqual(json.loads(call.kwargs['contents']),
+                         {'server_chat': server, 'private_feedback': private})
+        self.assertEqual(call.kwargs['config'].system_instruction, 'my custom instructions only')

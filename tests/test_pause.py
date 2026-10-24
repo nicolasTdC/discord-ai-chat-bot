@@ -232,7 +232,7 @@ class PauseTests(unittest.IsolatedAsyncioTestCase):
         await self.command('some feedback', uid=40)
         entered, release = asyncio.Event(), asyncio.Event()
 
-        async def answer(*args):
+        async def answer(*args, **kwargs):
             entered.set()
             await release.wait()
             return 'current feedback reply'

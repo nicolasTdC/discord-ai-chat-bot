@@ -260,11 +260,12 @@ class Gemini:
             return None
         return text
 
-    async def feedback_answer(self, context, participant_id):
+    async def feedback_answer(self, context, participant_id, *, server_context=None):
         prompt = self.feedback_prompt.replace('{{OWNER_USER_ID}}', str(self.owner_id))
         prompt = prompt.replace('{{PARTICIPANT_USER_ID}}', str(participant_id))
         response = await asyncio.wait_for(self.client.aio.models.generate_content(
-            model=self.model, contents=json.dumps(context, ensure_ascii=False),
+            model=self.model, contents=json.dumps(
+                {'server_chat': server_context, 'private_feedback': context}, ensure_ascii=False),
             config=types.GenerateContentConfig(
                 system_instruction=prompt, max_output_tokens=1000)), timeout=75)
         text = (response.text or '').strip()
@@ -493,6 +494,13 @@ class ChatBot(discord.Client):
             if len(entries) == 20:
                 break
         return list(reversed(entries))
+
+    async def feedback_server_context(self):
+        channel = await self.channel()
+        newest = [m async for m in channel.history(limit=1)]
+        entries = await self.context(channel, newest[0]) if newest else []
+        return {'available': True, 'guild_id': self.config.guild_id,
+                'channel_id': self.config.channel_id, 'messages': entries}
 
     async def scan(self):
         async with self.lock:

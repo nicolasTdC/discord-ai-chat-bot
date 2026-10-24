@@ -333,11 +333,21 @@ class FeedbackService:
         batch = None
         text = None
         try:
+            try:
+                server_context = await self.bot.feedback_server_context()
+            except Exception as error:
+                log.warning('Feedback server context unavailable user=%s (%s)', uid, type(error).__name__)
+                server_context = {'available': False, 'messages': []}
+            # Pause/catch-up may have started during the read. Leave the batch queued.
+            if (not self.bot.automatic_replies_enabled or uid in self.catchup_pending
+                    or self.inbox_lock(uid).locked()):
+                return
             batch = self.store.claim(uid)
             if batch is None:
                 return
             try:
-                text = await self.bot.gemini.feedback_answer(batch['context'], uid)
+                text = await self.bot.gemini.feedback_answer(
+                    batch['context'], uid, server_context=server_context)
                 if not text:
                     text = 'Entendi a sugestão, obrigada por me contar!'
             except Exception as error:
