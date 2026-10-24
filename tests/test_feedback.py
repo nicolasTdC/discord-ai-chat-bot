@@ -27,12 +27,13 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.participant_channel = NS(send=AsyncMock(), history=Channel([]).history)
         self.owner = NS(create_dm=AsyncMock(return_value=self.owner_channel))
         self.participant = NS(create_dm=AsyncMock(return_value=self.participant_channel))
-        self.bot = ChatBot(self.config, State(Path(self.tmp.name) / 'state.json', False),
+        self.bot = ChatBot(self.config, State(Path(self.tmp.name) / 'state.json', True),
                            NS(feedback_answer=AsyncMock(return_value='boa sugestão!')))
         self.bot.get_user = Mock(side_effect=lambda uid: self.owner if uid == 30 else self.participant)
         self.bot.fetch_user = AsyncMock(side_effect=lambda uid: self.owner if uid == 30 else self.participant)
         self.service = self.make_service()
         self.bot.feedback = self.service
+        self.bot.clear_legacy_commands = AsyncMock()
         self.dm = Mock(spec=discord.DMChannel)
         self.dm.send = AsyncMock()
 
@@ -84,7 +85,7 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('submissions=100,101', report)
         self.assertIn('boa sugestão!', report)
         self.assertIn('delivered', report)
-        self.assertFalse(self.bot.state.enabled)  # pause does not block feedback
+        self.assertTrue(self.bot.state.enabled)
         self.assertIsNone(self.bot.state.pending_direction)
 
     async def test_authorization_and_owner_routing(self):

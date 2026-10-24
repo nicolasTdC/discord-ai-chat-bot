@@ -8,10 +8,10 @@
 4. Under **Privileged Gateway Intents**, enable **Message Content Intent** and save. Server Members and Presence intents are not required.
 5. Turn **Public Bot** off. Keep **Requires OAuth2 Code Grant** off. Use a server you own/manage for your bot.
 6. Under **Token**, tap **Reset Token** and confirm if necessary, then **Copy**. This is `DISCORD_BOT_TOKEN`. Never use your personal Discord account token. Treat the bot token like a password; reset it if exposed.
-7. Open **OAuth2 → URL Generator**. Select scopes **bot** and **applications.commands**. Select bot permissions **View Channels**, **Send Messages**, and **Read Message History**. Do not grant Administrator.
+7. Open **OAuth2 → URL Generator**. Select the **bot** scope. Controls use owner DMs; no slash-command scope is required. Select bot permissions **View Channels**, **Send Messages**, and **Read Message History**. Do not grant Administrator.
 8. Copy the generated URL, open it in Chrome, choose your server, and authorize. You need permission to manage that server. If the developer portal restricts a private app's OAuth URL, use its **Application ID** from **General Information** in this URL (replace APPLICATION_ID):
 
-   `https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot%20applications.commands&permissions=68608`
+   `https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot&permissions=68608`
 
 9. In Discord, set channel permissions so the bot can view, read history, and send in the configured channel. Restrict its role's access to other channels if desired. The code also enforces the configured guild/channel regardless of permissions.
 
@@ -22,7 +22,7 @@
 3. Long-press the text channel in the channel list and tap **Copy Channel ID**. Set `DISCORD_CHANNEL_ID` to that number. Use a normal server text channel, not a DM, forum, voice channel, or thread.
 4. Find a message from each authorized participant, tap their avatar to open their profile, tap **⋮**, then **Copy User ID**. Repeat for everyone you want to authorize. You can also long-press their member-list entry to find the copy action.
 5. Set `ALLOWED_USER_IDS` to one or more numbers separated by commas, without usernames. Confirm you selected the correct people; names can change and are not identifiers.
-6. Copy the ID of the person allowed to control the bot and set `OWNER_USER_ID`. The owner may be one of the authorized participants or a different user. Only this ID can use controls: slash commands in the configured channel and owner commands in direct messages. Other allowlisted participants can submit private feedback by DM.
+6. Copy the ID of the person allowed to control the bot and set `OWNER_USER_ID`. The owner may be one of the authorized participants or a different user. Only this ID can use controls, through direct messages to the bot. Other allowlisted participants can submit private feedback by DM.
 
 This repository does not guess IDs from the supplied usernames.
 
@@ -70,7 +70,8 @@ Open `.env` in your editor and fill all blank values. Do not overwrite an existi
 | `MAX_SCAN_INTERVAL_SECONDS` | Default `120`; upper bound, at least the minimum |
 | `MAX_RESPONSES_PER_SCAN` | Default `1`; positive integer, maximum response attempts per heartbeat |
 | `SKIP_LOW_CONTENT_MESSAGES` | Default `true`; locally skip laughter, common keyboard mashing, and brief acknowledgments |
-| `BOT_ENABLED` | `true` or `false`; used when valid saved enabled state is absent |
+
+`BOT_ENABLED` is deprecated and ignored, including in older environment files. Each process launch overrides any saved running mode and starts paused; only an owner `resume` DM enables automatic replies. Reconnecting within the same process preserves the selected mode.
 
 Start with:
 
@@ -82,11 +83,12 @@ Keep the terminal/process running. Stop with Ctrl+C. Logging goes to stdout. Mis
 
 ### First live check
 
-1. Confirm the log says Discord connected and the slash commands appear in the configured server/channel. If missing, check invite scopes and command-sync errors.
-2. Existing channel messages should receive no replies on the first fresh startup. Send a new text message as one of the allowed users; wait one heartbeat (initially 30 seconds, with 10–120 second bounds by default), plus generation time.
-3. Confirm a reply arrives. Messages from another user, another bot, or another channel should not produce a reply.
-4. As the owner, run `/bot_pause`, send another message, and confirm no response after a heartbeat. Run `/bot_status` to check state. Run `/bot_resume`: messages sent during the pause should stay unanswered. Send a fresh message and check the next heartbeat.
-5. Check that factual responses remain natural text without an automatic source footer. Check logs for Gemini failures; absent sources are not proof of grounding success.
+1. Confirm the log says Discord connected. DM `status` from `OWNER_USER_ID`; it must report paused, with no automatic public or feedback replies.
+2. On a fresh installation, existing public messages are skipped. Send a new allowlisted participant message while paused; it should remain unanswered. Private feedback should still be collected and reported to the owner.
+3. DM `resume` as the owner. After the clamped fallback delay plus generation time, pending public messages are processed using the normal response cap and private feedback receives a delayed combined reply. Unauthorized users, other bots, and other public channels cannot trigger replies.
+4. DM `pause` as the owner. Any current automatic reply finishes before confirmation; subsequent automatic replies wait. New public and private feedback messages remain queued. Explicit owner `say` and `reply` commands still work.
+5. Check that factual responses remain natural text without an automatic source footer. A process restart must return to paused even if its previous mode was running.
+6. On the next explicitly authorized launch after this update, old global and configured-guild slash registrations are cleared. Other guilds are untouched; failures are logged and retried on reconnect. No slash commands are registered.
 
 No live API calls are part of the offline tests. You must supply real secrets and IDs for this live check.
 

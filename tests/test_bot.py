@@ -216,26 +216,21 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                                  message(102, 50, bot=True), message(103, text='kkkk')]
         await self.bot.scan()
         self.assertEqual(self.bot.pacing.last_id, 100)
-        await self.bot.control(self.interaction(), 'pause')
+        await self.bot.set_mode(False)
         self.assertIsNone(self.bot.pacing.last_id)
-        await self.bot.control(self.interaction(), 'resume')
+        await self.bot.set_mode(True)
         self.assertIsNone(self.bot.pacing.average_gap)
 
-    async def test_heartbeat_sleeps_using_adaptive_delay(self):
+    async def test_heartbeat_uses_interruptible_wait(self):
         self.bot.wait_until_ready = AsyncMock()
         self.bot.is_closed = lambda: False
         self.bot.is_ready = lambda: True
         self.bot.scan = AsyncMock()
-        with patch.object(self.bot.pacing, 'delay', return_value=17), patch(
-                'bot.asyncio.sleep', new=AsyncMock(side_effect=asyncio.CancelledError)) as sleep:
-            with self.assertRaises(asyncio.CancelledError):
-                await self.bot.heartbeat()
-            sleep.assert_awaited_once_with(17)
-        self.state.enabled = False
-        with patch('bot.asyncio.sleep', new=AsyncMock(side_effect=asyncio.CancelledError)) as sleep:
-            with self.assertRaises(asyncio.CancelledError):
-                await self.bot.heartbeat()
-            sleep.assert_awaited_once_with(self.bot.config.max_interval)
+        self.bot.wait_for_scan = AsyncMock(side_effect=asyncio.CancelledError)
+        with self.assertRaises(asyncio.CancelledError):
+            await self.bot.heartbeat()
+        self.bot.scan.assert_awaited_once()
+        self.bot.wait_for_scan.assert_awaited_once()
 
     async def test_scope(self):
         for msg in [message(1, 99), message(2, bot=True), message(3, channel=99),
@@ -243,38 +238,24 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.bot.relevant(msg))
         self.assertTrue(self.bot.relevant(message(7, 40)))
 
-    def interaction(self, uid=30, channel=20):
-        return NS(user=NS(id=uid), guild_id=10, channel_id=channel,
-                  response=NS(send_message=AsyncMock(), defer=AsyncMock()),
-                  followup=NS(send=AsyncMock()))
-
-    async def test_owner_commands_pause_resume_skip_backlog(self):
+    async def test_pause_resume_preserves_public_backlog(self):
         await self.bot.scan()
-        denied = self.interaction(40)
-        await self.bot.control(denied, 'pause')
-        self.assertTrue(self.state.enabled)
-        denied.response.send_message.assert_awaited_once()
-        wrong_channel = self.interaction(channel=99)
-        await self.bot.control(wrong_channel, 'pause')
-        self.assertTrue(self.state.enabled)
-        await self.bot.control(self.interaction(), 'pause')
+        await self.bot.set_mode(False)
         self.assertFalse(self.state.enabled)
         self.channel.messages.append(message(101))
         await self.bot.scan()
         self.gemini.answer.assert_not_awaited()
-        self.assertEqual(self.state.last_seen_message_id, 101)
+        self.assertEqual(self.state.last_seen_message_id, 100)
         self.channel.messages.append(message(102))
-        await self.bot.control(self.interaction(), 'resume')
+        await self.bot.set_mode(True)
         self.assertTrue(self.state.enabled)
-        self.assertEqual(self.state.last_seen_message_id, 102)
+        self.assertEqual(self.state.last_seen_message_id, 100)
         await self.bot.scan()
         self.gemini.answer.assert_not_awaited()
-        self.channel.messages.append(message(103))
+        self.bot.automatic_ready_at = 0
         await self.bot.scan()
-        self.gemini.answer.assert_awaited_once()
-        await self.bot.control(self.interaction(), 'status')
-        self.assertEqual({c.name for c in self.bot.tree.get_commands(guild=discord.Object(id=10))},
-                         {'bot_pause', 'bot_resume', 'bot_status'})
+        self.assertEqual(self.gemini.answer.await_count, 2)
+        self.assertFalse(hasattr(self.bot, 'tree'))
 
     async def test_failure_is_not_retried_and_next_message_runs(self):
         self.state.save(True, 100)

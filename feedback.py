@@ -139,6 +139,11 @@ class FeedbackStore:
                 WHERE scope=? AND deadline IS NOT NULL AND deadline<=?''',
                 (now + fallback, self.scope, now))
 
+    def resume_deadlines(self, now, delay):
+        with self.db:
+            self.db.execute('UPDATE conversations SET deadline=MAX(deadline,?) '
+                            'WHERE scope=? AND deadline IS NOT NULL', (now + delay, self.scope))
+
     def pending_reports(self, uid):
         return self.db.execute('SELECT 1 FROM reports WHERE scope=? AND uid=? LIMIT 1',
                                (self.scope, uid)).fetchone() is not None
@@ -218,7 +223,8 @@ class FeedbackService:
         if self.stopping:
             return
         if not message.content.strip():
-            await self.bot.dm_send(message.channel, 'Me manda a sugestão por texto?')
+            if self.bot.automatic_replies_enabled:
+                await self.bot.dm_send(message.channel, 'Me manda a sugestão por texto?')
             return
         uid = message.author.id
         while uid in self.catchup_pending and not self.stopping:
@@ -231,7 +237,8 @@ class FeedbackService:
                 self.save_message(message)
         except Exception as error:
             log.error('Feedback save failed user=%s (%s)', uid, type(error).__name__)
-            await self.bot.dm_send(message.channel, 'Não consegui salvar sua sugestão agora. Pode tentar de novo mais tarde?')
+            if self.bot.automatic_replies_enabled:
+                await self.bot.dm_send(message.channel, 'Não consegui salvar sua sugestão agora. Pode tentar de novo mais tarde?')
             return
         # Owner reports bypass conversational pacing and have their own durable retry queue.
         try:
@@ -320,7 +327,8 @@ class FeedbackService:
                     log.warning('Feedback report pending id=%s (%s)', row['id'], type(error).__name__)
 
     async def respond(self, uid):
-        if uid in self.catchup_pending or self.inbox_lock(uid).locked():
+        if (not self.bot.automatic_replies_enabled
+                or uid in self.catchup_pending or self.inbox_lock(uid).locked()):
             return
         batch = None
         text = None
@@ -359,7 +367,18 @@ class FeedbackService:
                 except Exception:
                     log.error('Feedback failure could not be saved user=%s', uid)
 
+    def resume_timers(self):
+        self.store.resume_deadlines(self.clock(), self.pacing_factory().fallback)
+        for pacing in self.pacing.values():
+            pacing.reset()
+
+    async def drain_replies(self):
+        await asyncio.gather(*(asyncio.shield(task) for task in list(self.tasks.values())
+                               if not task.done()), return_exceptions=True)
+
     async def tick(self):
+        if not self.bot.automatic_replies_enabled:
+            return
         for uid in self.store.due_users(self.clock()):
             if (uid not in self.bot.config.allowed_ids or uid == self.bot.config.owner_id
                     or uid in self.catchup_pending or self.inbox_lock(uid).locked()):

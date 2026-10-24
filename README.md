@@ -7,7 +7,7 @@ A configurable Discord chat bot built with Python, discord.py, and Google's Gemi
 - General chat example with no fixed character or debate scenario.
 - Google Search grounding with a cautious fallback when search is unavailable.
 - Adaptive polling, conversation context, and configurable reply limits.
-- Owner-only `/bot_pause`, `/bot_resume`, and `/bot_status` commands.
+- Always starts paused; owner-only `pause`, `resume`, and `status` controls through DMs.
 - Private owner DM commands to post now, reply to a specific message, or save conversation directions.
 - Delayed participant feedback DMs, private conversation history, and full owner reports.
 - Persistent message cursor, disabled outgoing mentions, and offline tests.
@@ -33,6 +33,8 @@ Fill in the tokens and numeric Discord IDs in `.env`, enable Message Content Int
 python bot.py
 ```
 
+Every launch starts paused, including restarts. From `OWNER_USER_ID`, DM `resume` to start automatic public and feedback replies, `pause` to stop them, or `status` to check the mode. Feedback collection, owner reports, and explicit manual `say`/`reply` commands remain available while paused. Slash commands are no longer used.
+
 ## Customize the prompt
 
 The included [system_prompt.txt](system_prompt.txt) is a general chat example. To use a personal prompt, save it outside the repository or as ignored `system_prompt.local.txt`, then set `SYSTEM_PROMPT_PATH` in your private `.env`:
@@ -48,11 +50,13 @@ Relative paths resolve from the repository root; absolute paths work too. The fi
 DM the bot from the account configured as `OWNER_USER_ID`. Type `help` to see commands.
 
 ```text
+status
+resume
+pause
 say Bring up weekend plans naturally
 reply https://discord.com/channels/GUILD_ID/CHANNEL_ID/MESSAGE_ID Ask why they disagree
 next Ask a follow-up about their last point
 set Keep responses short and informal
-status
 clear next
 clear standing
 clear all
@@ -66,7 +70,7 @@ Instructions and confirmations stay in your DMs, outside the channel conversatio
 
 Allowlisted participants can DM the bot normally to discuss recommendations. The owner continues to use the owner-command interface. Participant messages are saved and forwarded privately to `OWNER_USER_ID`; the bot gives one natural response after a delay, combining messages sent before its timer fires. Feedback cannot execute owner commands or change bot behavior.
 
-Each participant has independent adaptive pacing using the same scan interval/bounds as public replies. Feedback conversations work while public replies are paused, and histories and pending work survive restarts in ignored `private_data/feedback.sqlite3`. On startup and reconnect, the bot checks allowlisted participants’ DM histories for missed feedback. Saved cursors and submission IDs prevent duplicate processing; replies still wait for the normal timer. On upgrade, catch-up starts after the last saved participant message; a participant with no saved feedback imports available DM history once. Owner commands are never replayed. Owner reports include the full exchange; undelivered reports retry every 60 seconds. No first-message notice or immediate routine receipt is sent.
+Each participant has independent adaptive pacing using the same scan interval/bounds as public replies. Feedback is collected and reported while paused; conversational replies wait for `resume`. Histories and pending work survive restarts in ignored `private_data/feedback.sqlite3`. On startup and reconnect, the bot checks allowlisted participants’ DM histories for missed feedback. Saved cursors and submission IDs prevent duplicate processing; replies still wait for the normal timer. On upgrade, catch-up starts after the last saved participant message; a participant with no saved feedback imports available DM history once. Owner commands are never replayed. Owner reports include the full exchange; undelivered reports retry every 60 seconds. No first-message notice or immediate routine receipt is sent.
 
 ### Customize feedback behavior
 
@@ -83,7 +87,7 @@ Use this prompt to define the private persona, tone, and approach to recommendat
 - [Setup and configuration](docs/setup.md)
 - [Operation, delivery behavior, deployment, and tests](docs/operations.md)
 
-Public replies are restricted to allowlisted participants in the configured channel; allowlisted participants can also send private feedback DMs. Their message text is sent to Google's API. Run one instance per channel/state file. The bot skips existing messages on a fresh start and uses at-most-once response attempts; a failed generation or send may lose a reply.
+Public replies are restricted to allowlisted participants in the configured channel; allowlisted participants can also send private feedback DMs. Their message text is sent to Google's API. Run one instance per channel/state file. Paused backlogs are processed after resume using normal response limits. The bot skips existing messages on a fresh start and uses at-most-once response attempts; a failed generation or send may lose a reply.
 
 ## Tests
 

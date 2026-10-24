@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import discord
-from discord import app_commands
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -22,7 +21,10 @@ log = logging.getLogger('discord_ai_chat')
 UNCHANGED = object()
 DM_HELP = ('say <direction> — post now\nreply <message-link> [direction] — reply now\n'
            'next <direction> — guide next automatic response\nset <direction> — standing direction\n'
-           'clear next|standing|all — remove directions\nstatus — show directions\nhelp — show help')
+           'clear next|standing|all — remove directions\n'
+           'pause — stop automatic public and feedback replies\n'
+           'resume — process queued messages after the normal delay\n'
+           'status — show mode and directions\nhelp — show help')
 
 
 @dataclass(frozen=True)
@@ -60,9 +62,6 @@ class Config:
         allowed = frozenset(int(x.strip()) for x in ids)
         if not allowed or min(allowed) <= 0:
             raise ValueError('ALLOWED_USER_IDS must contain at least one positive numeric ID')
-        enabled = os.getenv('BOT_ENABLED', 'true').lower().strip()
-        if enabled not in ('true', 'false'):
-            raise ValueError('BOT_ENABLED must be true or false')
         interval = int(os.getenv('SCAN_INTERVAL_SECONDS', '30'))
         if interval <= 0:
             raise ValueError('SCAN_INTERVAL_SECONDS must be positive')
@@ -79,7 +78,7 @@ class Config:
         return cls(required('DISCORD_BOT_TOKEN'), positive('DISCORD_GUILD_ID'),
                    positive('DISCORD_CHANNEL_ID'), allowed, positive('OWNER_USER_ID'),
                    required('GEMINI_API_KEY'), os.getenv('GEMINI_MODEL', '').strip()
-                   or 'gemini-flash-latest', interval, enabled == 'true', maximum, skip == 'true',
+                   or 'gemini-flash-latest', interval, False, maximum, skip == 'true',
                    minimum_interval, maximum_interval)
 
 
@@ -279,23 +278,46 @@ class ChatBot(discord.Client):
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none(),
                          proxy=os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY'))
         self.config, self.state, self.gemini = config, state, gemini
-        self.tree = app_commands.CommandTree(self)
         self.lock = asyncio.Lock()
         self.worker = None
         self.feedback = None
         self.pacing = AdaptiveHeartbeat(config)
-        guild = discord.Object(id=config.guild_id)
-        for name, description, action in [
-            ('bot_pause', 'Pause chat responses', 'pause'),
-            ('bot_resume', 'Resume from the newest current message', 'resume'),
-            ('bot_status', 'Show current bot status', 'status'),
-        ]:
-            def callback_for(action):
-                async def callback(interaction: discord.Interaction):
-                    await self.control(interaction, action)
-                return callback
-            self.tree.add_command(app_commands.Command(
-                name=name, description=description, callback=callback_for(action)), guild=guild)
+        self.control_lock = asyncio.Lock()
+        self.pause_requested = False
+        self.automatic_ready_at = 0
+        self.heartbeat_wakeup = asyncio.Event()
+        self.command_cleanup_lock = asyncio.Lock()
+        self.commands_cleared = set()
+
+    @property
+    def automatic_replies_enabled(self):
+        return self.state.enabled and not self.pause_requested
+
+    async def set_mode(self, enabled):
+        async with self.control_lock:
+            if enabled == self.automatic_replies_enabled and (enabled or not self.state.enabled):
+                return 'Already running.' if enabled else 'Already paused.'
+            if not enabled:
+                # Close the gate before waiting for in-flight replies or the scan lock.
+                self.pause_requested = True
+                async with self.lock:
+                    self.state.save(False, self.state.last_seen_message_id)
+                if self.feedback is not None:
+                    await self.feedback.drain_replies()
+                self.pacing.reset()
+                self.heartbeat_wakeup.set()
+                return 'Paused. Feedback collection, owner reports, and manual say/reply remain available.'
+            async with self.lock:
+                if self.state.last_seen_message_id is None:
+                    await self.baseline(await self.channel(), False)
+                if self.feedback is not None:
+                    self.feedback.resume_timers()
+                self.state.save(True, self.state.last_seen_message_id)
+                self.pacing.reset()
+                self.automatic_ready_at = time.monotonic() + self.pacing.fallback
+                self.pause_requested = False
+                self.heartbeat_wakeup.set()
+            return 'Running. Queued public messages and feedback will be processed after the normal delay.'
 
     def directions(self, response_direction=None, action='automatic reply'):
         return {'standing_direction': self.state.standing_direction,
@@ -344,11 +366,14 @@ class ChatBot(discord.Client):
                 return
             target_id = int(link.group(3))
             argument = reply_parts[1].strip() if len(reply_parts) == 2 else ''
-        elif (command not in {'say', 'next', 'set', 'clear', 'status', 'help'}
+        elif (command not in {'say', 'next', 'set', 'clear', 'status', 'help', 'pause', 'resume'}
               or (command in {'say', 'next', 'set'} and not argument)
               or (command == 'clear' and argument not in {'next', 'standing', 'all'})
-              or (command in {'status', 'help'} and argument)):
+              or (command in {'status', 'help', 'pause', 'resume'} and argument)):
             await self.dm_send(message.channel, DM_HELP)
+            return
+        if command in {'pause', 'resume'}:
+            await self.dm_send(message.channel, await self.set_mode(command == 'resume'))
             return
         if command == 'help':
             await self.dm_send(message.channel, DM_HELP)
@@ -357,7 +382,8 @@ class ChatBot(discord.Client):
             await self.dm_send(message.channel, 'Request queued; waiting for any current response to finish.')
         async with self.lock:
             if command == 'status':
-                result = (f'enabled={self.state.enabled}\n'
+                result = (f'mode={"running" if self.automatic_replies_enabled else "paused"}\n'
+                          'Feedback collection, owner reports, and manual say/reply remain available.\n'
                           f'Next: {self.state.pending_direction or "(none)"}\n'
                           f'Standing: {self.state.standing_direction or "(none)"}')
             elif command in {'next', 'set', 'clear'}:
@@ -399,6 +425,8 @@ class ChatBot(discord.Client):
         await self.dm_send(message.channel, result)
 
     async def setup_hook(self):
+        self.pause_requested = True
+        self.state.save(False, self.state.last_seen_message_id)
         scope = f'{self.config.guild_id}:{self.config.channel_id}:{self.config.owner_id}'
         self.feedback = FeedbackService(
             self, FeedbackStore(ROOT / 'private_data' / 'feedback.sqlite3', scope),
@@ -410,14 +438,29 @@ class ChatBot(discord.Client):
         log.info('Discord connected as bot ID %s', self.user.id)
         if self.feedback is not None:
             self.feedback.request_catchup()
-        try:
-            await self.tree.sync(guild=discord.Object(id=self.config.guild_id))
-        except Exception as error:
-            log.error('Slash command sync failed (%s); will retry on reconnect', type(error).__name__)
+        await self.clear_legacy_commands()
+
+    async def clear_legacy_commands(self):
+        # Remove old registrations only when an explicitly launched client connects.
+        async with self.command_cleanup_lock:
+            for scope in ('global', 'guild'):
+                if scope in self.commands_cleared:
+                    continue
+                try:
+                    if scope == 'global':
+                        await self.http.bulk_upsert_global_commands(self.application_id, [])
+                    else:
+                        await self.http.bulk_upsert_guild_commands(
+                            self.application_id, self.config.guild_id, [])
+                    self.commands_cleared.add(scope)
+                except Exception as error:
+                    log.warning('Legacy command cleanup pending scope=%s (%s); retry on reconnect',
+                                scope, type(error).__name__)
 
     async def on_resumed(self):
         if self.feedback is not None:
             self.feedback.request_catchup()
+        await self.clear_legacy_commands()
 
     async def channel(self):
         channel = self.get_channel(self.config.channel_id)
@@ -454,8 +497,10 @@ class ChatBot(discord.Client):
     async def scan(self):
         async with self.lock:
             channel = await self.channel()
-            if self.state.last_seen_message_id is None or not self.state.enabled:
+            if self.state.last_seen_message_id is None:
                 await self.baseline(channel, self.state.enabled)
+                return
+            if not self.automatic_replies_enabled or time.monotonic() < self.automatic_ready_at:
                 return
             newest = [m async for m in channel.history(limit=1)]
             if not newest or newest[0].id <= self.state.last_seen_message_id:
@@ -473,6 +518,8 @@ class ChatBot(discord.Client):
             # Prefer the latest substantive messages; earlier ones remain in context.
             selected = {m.id for m in candidates[-self.config.max_responses:]}
             for message in messages:
+                if not self.automatic_replies_enabled:
+                    return
                 if message.id not in selected:
                     self.state.save(self.state.enabled, message.id)
                     continue
@@ -482,6 +529,8 @@ class ChatBot(discord.Client):
                 except Exception as error:
                     log.error('Context for message %s failed (%s, status=%s); retry next heartbeat',
                               message.id, type(error).__name__, getattr(error, 'status', None))
+                    return
+                if not self.automatic_replies_enabled:
                     return
                 # At-most-once: persist BEFORE generation/send. Failed replies are skipped.
                 direction = self.state.pending_direction
@@ -513,29 +562,19 @@ class ChatBot(discord.Client):
                     await self.scan()
             except Exception as error:
                 log.error('Heartbeat failed (%s); will retry next interval', type(error).__name__)
-            delay = self.pacing.delay() if self.state.enabled else self.config.max_interval
-            log.info('Next heartbeat in %.1fs', delay)
-            await asyncio.sleep(delay)
+            await self.wait_for_scan()
 
-    async def control(self, interaction, action):
-        if (interaction.user.id != self.config.owner_id
-                or interaction.guild_id != self.config.guild_id
-                or interaction.channel_id != self.config.channel_id):
-            await interaction.response.send_message('Not authorized here.', ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            async with self.lock:
-                if action in ('pause', 'resume'):
-                    await self.baseline(await self.channel(), action == 'resume')
-                delay = self.pacing.delay() if self.state.enabled else self.config.max_interval
-                status = (f'enabled={self.state.enabled}; last_seen_message_id={self.state.last_seen_message_id}; '
-                          f'heartbeat_seconds={delay:.1f}; '
-                          f'bounds={self.config.min_interval}–{self.config.max_interval}')
-            await interaction.followup.send(status, ephemeral=True)
-        except Exception as error:
-            log.error('Control failed (%s)', type(error).__name__)
-            await interaction.followup.send('Operation failed; check process logs.', ephemeral=True)
+    async def wait_for_scan(self):
+        while True:
+            self.heartbeat_wakeup.clear()
+            delay = self.pacing.delay() if self.automatic_replies_enabled else self.config.max_interval
+            if self.automatic_replies_enabled:
+                delay = max(delay, self.automatic_ready_at - time.monotonic())
+            log.info('Next heartbeat in %.1fs', delay)
+            try:
+                await asyncio.wait_for(self.heartbeat_wakeup.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                return
 
     async def close(self):
         if self.feedback is not None:
