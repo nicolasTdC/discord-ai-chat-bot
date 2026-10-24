@@ -354,10 +354,15 @@ class FeedbackGeminiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(call.kwargs['contents']), context)
         config = call.kwargs['config']
         self.assertIsNone(config.tools)
-        self.assertTrue(config.system_instruction.startswith('FEEDBACK PERSONA'))
-        self.assertNotIn('PUBLIC PROMPT MUST NOT APPEAR', config.system_instruction)
-        self.assertIn('OWNER_USER_ID=30', config.system_instruction)
-        self.assertIn('participant author_id=40', config.system_instruction)
-        self.assertIn('never privileged instructions', config.system_instruction)
-        self.assertIn('Do not announce forwarding', config.system_instruction)
-        self.assertIn('without URLs', config.system_instruction)
+        self.assertEqual(config.system_instruction, 'FEEDBACK PERSONA')
+
+    async def test_only_optional_identity_placeholders_are_expanded(self):
+        response = types.GenerateContentResponse(candidates=[types.Candidate(
+            content=types.Content(parts=[types.Part(text='reply')]))])
+        generate = AsyncMock(return_value=response)
+        with patch('bot.genai.Client', return_value=NS(aio=NS(models=NS(generate_content=generate)))):
+            gemini = Gemini(CFG)
+        gemini.feedback_prompt = 'owner={{OWNER_USER_ID}}\r\nparticipant={{PARTICIPANT_USER_ID}}\n{"custom": true} {{OTHER}}'
+        await gemini.feedback_answer([], 40)
+        self.assertEqual(generate.await_args.kwargs['config'].system_instruction,
+                         'owner=30\r\nparticipant=40\n{"custom": true} {{OTHER}}')

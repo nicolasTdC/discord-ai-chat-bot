@@ -76,7 +76,7 @@ Feedback uses its own [feedback_prompt.txt](feedback_prompt.txt), independently 
 FEEDBACK_PROMPT_PATH=private_data/feedback_prompt.txt
 ```
 
-Use this prompt to define the private persona, tone, and approach to recommendations. Relative paths resolve from the repository root; absolute paths and `~` work too. UTF-8 contents and line endings are preserved. Blank/unset uses the included default. Restart after editing the prompt or changing the path; an invalid path fails startup. Feedback uses neither public channel history nor the owner's saved directions. Feedback text is sent to Gemini without web search. Keep personal prompts out of commits.
+Use this prompt to define the private persona, tone, and approach to recommendations. Its contents are the entire feedback system instruction; no fixed behavior instructions are appended. Optional `{{OWNER_USER_ID}}` and `{{PARTICIPANT_USER_ID}}` placeholders expand to the configured Discord IDs. Relative paths resolve from the repository root; absolute paths and `~` work too. UTF-8 contents and line endings are preserved. Blank/unset uses the included default. Restart after editing the prompt or changing the path; an invalid path fails startup. Feedback uses neither public channel history nor the owner's saved directions. Feedback text is sent to Gemini without web search. Keep personal prompts out of commits.
 
 ## Documentation
 
