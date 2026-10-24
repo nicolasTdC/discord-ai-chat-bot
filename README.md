@@ -8,6 +8,7 @@ A configurable Discord chat bot built with Python, discord.py, and Google's Gemi
 - Google Search grounding with a cautious fallback when search is unavailable.
 - Adaptive polling, conversation context, and configurable reply limits.
 - Owner-only `/bot_pause`, `/bot_resume`, and `/bot_status` commands.
+- Private owner DM commands to post now, reply to a specific message, or save conversation directions.
 - Persistent message cursor, disabled outgoing mentions, and offline tests.
 
 ## Quick start
@@ -40,6 +41,25 @@ SYSTEM_PROMPT_PATH=system_prompt.local.txt
 ```
 
 Relative paths resolve from the repository root; absolute paths work too. The file is read as UTF-8 without altering its contents. Restart the bot after changing the prompt. Keep personal prompts and credentials out of commits.
+
+## Private instructions while running
+
+DM the bot from the account configured as `OWNER_USER_ID`. Type `help` to see commands.
+
+```text
+say Bring up weekend plans naturally
+reply https://discord.com/channels/GUILD_ID/CHANNEL_ID/MESSAGE_ID Ask why they disagree
+next Ask a follow-up about their last point
+set Keep responses short and informal
+status
+clear next
+clear standing
+clear all
+```
+
+Replace the example reply URL with **Copy Message Link** from a message in the configured channel. `say` and `reply` act immediately after any current response finishes, even while automatic replies are paused. `next` guides one automatic response attempt; `set` stays active until replaced or cleared. Both survive restarts.
+
+Instructions and confirmations stay in your DMs, outside the channel conversation. Directions are sent to Gemini and saved directions are stored in local `state.json`. Only generated conversational text is posted in the channel. See [operation details](docs/operations.md#private-owner-dms) for delivery and failure behavior.
 
 ## Documentation
 

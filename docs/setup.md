@@ -33,7 +33,7 @@ This repository does not guess IDs from the supplied usernames.
 3. Set `GEMINI_API_KEY`. Check project quota, supported region, and billing requirements in AI Studio. Google Search grounding may have separate pricing/limits. Review these before running continuously.
 4. `GEMINI_MODEL` selects the model. Blank or unset uses `gemini-flash-latest`, the lightweight Flash alias used in the current [official SDK examples](https://github.com/googleapis/python-genai#readme). An alias can change underneath you; pin a supported concrete model in your environment if reproducibility matters.
 
-The bot requests `types.Tool(google_search=types.GoogleSearch())` on each generation so the model can search when current claims require it. Unsupported models, search failures, quota errors, and timeouts trigger one attempt without tools, with explicit instructions to disclose lack of verification and avoid unverified current claims. Only HTTPS URLs supplied in grounding metadata are appended, at most three. A response without sources does **not** establish that its factual claims were verified. Model factual accuracy is not guaranteed; inspect consequential claims yourself.
+The bot requests `types.Tool(google_search=types.GoogleSearch())` on each generation so the model can search when current claims require it. Unsupported models, search failures, quota errors, and timeouts trigger one attempt without tools, with explicit instructions to disclose lack of verification and avoid unverified current claims. Grounding metadata is used without appending source links to Discord replies. The model is instructed to write natural conversational text without URLs, citation markers, or source footers. A response without sources does **not** establish that its factual claims were verified. Model factual accuracy is not guaranteed; inspect consequential claims yourself.
 
 Official references: [models](https://ai.google.dev/gemini-api/docs/models), [search grounding](https://ai.google.dev/gemini-api/docs/google-search), [Python SDK](https://github.com/googleapis/python-genai). Live grounding/model availability must be checked using your project.
 
@@ -84,7 +84,7 @@ Keep the terminal/process running. Stop with Ctrl+C. Logging goes to stdout. Mis
 2. Existing channel messages should receive no replies on the first fresh startup. Send a new text message as one of the allowed users; wait one heartbeat (initially 30 seconds, with 10–120 second bounds by default), plus generation time.
 3. Confirm a reply arrives. Messages from another user, another bot, or another channel should not produce a reply.
 4. As the owner, run `/bot_pause`, send another message, and confirm no response after a heartbeat. Run `/bot_status` to check state. Run `/bot_resume`: messages sent during the pause should stay unanswered. Send a fresh message and check the next heartbeat.
-5. Check useful factual responses for grounding sources. Check logs for Gemini failures; absent sources are not proof of grounding success.
+5. Check that factual responses remain natural text without an automatic source footer. Check logs for Gemini failures; absent sources are not proof of grounding success.
 
 No live API calls are part of the offline tests. You must supply real secrets and IDs for this live check.
 

@@ -11,3 +11,4 @@ state.tmp
 # Personal prompts and local customization
 system_prompt.local.txt
 prompts/local/
+/private_data/

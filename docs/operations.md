@@ -6,11 +6,11 @@ The bot measures timestamp gaps between newly observed, substantive messages fro
 
 Before it has two messages to learn from, it uses `SCAN_INTERVAL_SECONDS`. During inactivity the delay grows to at least half the elapsed idle time, capped at `MAX_SCAN_INTERVAL_SECONDS`. Every delay, including the initial fallback, stays inside the configured bounds. Paused scans use the maximum. First-start baselines and pause/resume reset timing samples; ordinary restarts also relearn timing, retaining the saved message cursor.
 
-Example: set fallback `30`, minimum `10`, maximum `90`. Messages spaced about 12 seconds apart bring scans near 12 seconds; a quiet channel gradually reaches 90 seconds. A new message in an idle channel is discovered at the next scheduled poll, so it can wait up to that interval. The bot still generates only during polling, without an `on_message` reply handler. API/context work adds latency before the next sleep; these bounds limit the polling sleep, not total reply time. `/bot_status` shows the current calculated delay and bounds; logs show each scheduled sleep.
+Example: set fallback `30`, minimum `10`, maximum `90`. Messages spaced about 12 seconds apart bring scans near 12 seconds; a quiet channel gradually reaches 90 seconds. A new message in an idle channel is discovered at the next scheduled poll, so it can wait up to that interval. Automatic replies still generate only during polling. A separate `on_message` handler accepts private owner DM commands; server messages do not trigger immediate replies. API/context work adds latency before the next sleep; these bounds limit the polling sleep, not total reply time. `/bot_status` shows the current calculated delay and bounds; logs show each scheduled sleep.
 
 ## State and delivery behavior
 
-`state.json` beside `bot.py` persists `enabled` and `last_seen_message_id`. Writes use a temporary file, fsync, and atomic replacement. Missing/malformed cursor state causes a fresh baseline at the newest message (or current-time snowflake in an empty channel), with no retrospective responses. A valid cursor is retained across restarts. A valid saved `enabled` overrides `BOT_ENABLED`.
+`state.json` beside `bot.py` persists `enabled`, `last_seen_message_id`, pending and standing directions, and manual reply target claims. Existing state files remain compatible. Writes use a temporary file, fsync, and atomic replacement. Missing/malformed cursor state causes a fresh baseline at the newest message (or current-time snowflake in an empty channel), with no retrospective responses. A valid cursor is retained across restarts. A valid saved `enabled` overrides `BOT_ENABLED`.
 
 Each heartbeat takes an upper message-ID snapshot and processes new messages in chronological order. By default it replies to at most the newest substantive message in that batch; earlier messages stay in context and are marked seen, rather than queued for replies later. Set `MAX_RESPONSES_PER_SCAN` to increase this cap. Laughter-only messages, common keyboard-row mashing, emoji-only reactions, and short acknowledgments are filtered locally when `SKIP_LOW_CONTENT_MESSAGES=true`. Substantive messages containing laughter still qualify. Gemini can also choose `[NO_REPLY]` when there is nothing useful to add; that marker is never sent to Discord. The cap counts generated responses, not Discord chunks; exceptionally long requested explanations still use safe splitting. Other users and bots advance bookkeeping but cannot trigger Gemini. Context contains up to 20 relevant text messages, including this bot's own replies, in chronological order; unauthorized messages are excluded. Old relevant messages can provide context, but are never replied to as new messages.
 
@@ -19,6 +19,30 @@ Each heartbeat takes an upper message-ID snapshot and processes new messages in 
 Paused heartbeats keep advancing the baseline. Resume atomically saves the newest channel message as the new baseline before enabling replies. Polling and controls share a lock; a pause cannot interrupt a reply already being generated, and its confirmation may wait for that reply. Generation attempts have timeouts. Connection errors are retried on later heartbeats; discord.py handles gateway reconnection and Discord rate limits. Failed state writes prevent new generation.
 
 Only plain message text is sent to Gemini: no attachment downloads, images, or embeds. Message content for authorized participants is transmitted to Google; arrange participant consent and applicable API data settings. Mentions are disabled in outgoing replies. Responses longer than Discord's limit are split at natural boundaries when possible, including emoji-aware limits.
+
+## Private owner DMs
+
+Only a direct message from `OWNER_USER_ID` is accepted. Other users, bots, server messages, and group DMs are ignored. No terminal input is required. Restart once after installing this update to enable the handler; later directions apply without restarting.
+
+| Command | Behavior |
+| --- | --- |
+| `say <direction>` | Generate a new channel message now, using recent conversation. |
+| `reply <message-link> [direction]` | Reply now to a substantive text message from an allowlisted human in the configured channel. |
+| `next <direction>` | Replace the pending direction for the next eligible automatic response attempt. |
+| `set <direction>` | Replace the standing direction for manual and automatic responses. |
+| `clear next` / `clear standing` / `clear all` | Remove the corresponding saved directions. |
+| `status` | Privately show enabled status and saved directions. |
+| `help` | Show command syntax. |
+
+Commands use explicit prefixes: ordinary conversation sent in a DM shows help rather than triggering a channel post. Direction text may contain spaces and newlines. Reply links must identify the configured guild and channel. Targets containing only laughter/reactions/acknowledgments are rejected even if the automatic low-content filter is disabled. Use Discord's Copy Message Link to obtain the URL.
+
+Manual commands acknowledge receipt in the DM before waiting for the existing response lock. They run after any active response completes and work even while automatic replies are paused. A manual request uses the latest 20 relevant channel messages; a reply target is supplied separately even when it is older than that window. Only the first outgoing chunk references the target, and mentions remain disabled. Results and errors return to the owner in DMs. Queued manual requests are held only in memory and are lost if the process stops.
+
+Standing directions apply to every response until cleared. A request-specific direction takes precedence over a standing direction. `next` applies only to automatic responses and is not consumed by manual requests, ignored channel messages, or context-read failures. It is atomically removed immediately before the automatic generation attempt, including attempts that fail or return `[NO_REPLY]`. Pausing, resuming, and restarting preserve pending and standing directions.
+
+Manual posts do not advance the automatic cursor. Before generating a targeted reply, the bot atomically records its target so later polling will skip an automatic attempt for that message. Claims survive restarts and are pruned when the cursor passes them. The claim remains after a failed generation/send or `[NO_REPLY]`, avoiding uncertain retries. You can explicitly issue another `reply` command to retry. Other eligible unread messages remain subject to normal polling. A failed state write prevents generation for both manual and automatic requests.
+
+Instructions are supplied separately from public conversation with a model instruction to follow them naturally and keep the private control exchange out of its reply. Instruction bodies are not logged or copied into channel context by the application. They are sent to Gemini, including on the cautious search fallback, and persistent directions are plaintext in the ignored local state file. Model-generated wording still requires judgment; separation of inputs is not a guarantee about every possible generated response.
 
 ## Deploy to a cloud host later
 
@@ -41,4 +65,4 @@ python -m pip check
 python -m unittest discover -s tests -v
 ```
 
-The offline suite checks authorization and scope, old-message baselines, ordering, duplicate prevention/restarts, pause/resume and owner controls, context privacy, malformed/partial state, failed writes, generation/send failures, empty responses, cautious search fallback, grounding source extraction, and Discord splitting. It needs no credentials. It cannot establish real Discord permissions, valid IDs/tokens, Gemini model availability, or successful live grounding.
+The offline suite checks authorization and scope, old-message baselines, ordering, duplicate prevention/restarts, pause/resume and owner controls, context privacy, malformed/partial state, failed writes, generation/send failures, empty responses, cautious search fallback, suppression of automatic grounding source footers, and Discord splitting. It needs no credentials. It cannot establish real Discord permissions, valid IDs/tokens, Gemini model availability, or successful live grounding.

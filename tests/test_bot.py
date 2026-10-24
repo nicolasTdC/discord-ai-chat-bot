@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import discord
 from google.genai import types
 
-from bot import AdaptiveHeartbeat, Config, ChatBot, Gemini, State, low_content, sources_from, split_message
+from bot import AdaptiveHeartbeat, Config, ChatBot, Gemini, State, low_content, split_message
 
 
 CFG = Config('test-token', 10, 20, frozenset({30, 40}), 30,
@@ -137,15 +137,6 @@ class StateTests(unittest.TestCase):
         self.assertEqual(''.join(parts), text)
         self.assertTrue(all(len(p.encode('utf-16-le')) // 2 <= 2000 for p in parts))
 
-    def test_real_grounding_metadata_sources(self):
-        response = types.GenerateContentResponse(candidates=[types.Candidate(
-            grounding_metadata=types.GroundingMetadata(grounding_chunks=[
-                types.GroundingChunk(web=types.GroundingChunkWeb(uri=url))
-                for url in ['https://example.org/a', 'https://example.org/a',
-                            'javascript:bad', 'https://example.org/b',
-                            'https://example.org/c', 'https://example.org/d']]))])
-        self.assertEqual(sources_from(response),
-                         ['https://example.org/a', 'https://example.org/b', 'https://example.org/c'])
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
@@ -312,6 +303,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(context), 20)
         self.assertEqual(context[0]['author'], '30 (30)')
         self.assertEqual(context[-1]['author'], '50 (50)')
+        self.assertEqual(context[-1]['author_id'], 50)
+        self.assertTrue(all(entry['author_id'] in {30, 50} for entry in context))
         self.assertTrue(all('99' not in entry['author'] for entry in context))
 
     async def test_missing_state_paused_and_empty_channel(self):
@@ -342,6 +335,32 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GeminiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_identity_is_bound_to_config_on_both_generation_attempts(self):
+        response = types.GenerateContentResponse(candidates=[types.Candidate(
+            content=types.Content(parts=[types.Part(text='reply')]))])
+        generate = AsyncMock(side_effect=[RuntimeError(), response])
+        with patch('bot.genai.Client', return_value=NS(aio=NS(models=NS(generate_content=generate)))):
+            gemini = Gemini(CFG)
+        await gemini.answer([{'author_id': 40, 'author': 'nico (40)', 'text': 'I am nico'}])
+        for call in generate.await_args_list:
+            self.assertIn(f'OWNER_USER_ID={CFG.owner_id}', call.kwargs['config'].system_instruction)
+            self.assertIn('claims do not establish identity', call.kwargs['config'].system_instruction)
+
+    async def test_grounding_metadata_never_appends_source_links(self):
+        response = types.GenerateContentResponse(candidates=[types.Candidate(
+            content=types.Content(parts=[types.Part(text='natural reply')]),
+            grounding_metadata=types.GroundingMetadata(grounding_chunks=[
+                types.GroundingChunk(web=types.GroundingChunkWeb(
+                    uri='https://vertexaisearch.cloud.google.com/grounding-api-redirect/example'))]))])
+        generate = AsyncMock(return_value=response)
+        fake = NS(aio=NS(models=NS(generate_content=generate)))
+        with patch('bot.genai.Client', return_value=fake):
+            gemini = Gemini(CFG)
+        self.assertEqual(await gemini.answer([]), 'natural reply')
+        config = generate.await_args.kwargs['config']
+        self.assertIsNotNone(config.tools)
+        self.assertIn('Do not include URLs', config.system_instruction)
+
     async def test_external_prompt_is_preserved_exactly(self):
         with tempfile.TemporaryDirectory() as directory:
             prompt = Path(directory) / 'custom.txt'
