@@ -12,3 +12,4 @@ state.tmp
 system_prompt.local.txt
 prompts/local/
 /private_data/
+feedback_prompt.local.txt

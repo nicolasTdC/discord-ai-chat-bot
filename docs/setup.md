@@ -22,7 +22,7 @@
 3. Long-press the text channel in the channel list and tap **Copy Channel ID**. Set `DISCORD_CHANNEL_ID` to that number. Use a normal server text channel, not a DM, forum, voice channel, or thread.
 4. Find a message from each authorized participant, tap their avatar to open their profile, tap **⋮**, then **Copy User ID**. Repeat for everyone you want to authorize. You can also long-press their member-list entry to find the copy action.
 5. Set `ALLOWED_USER_IDS` to one or more numbers separated by commas, without usernames. Confirm you selected the correct people; names can change and are not identifiers.
-6. Copy the ID of the person allowed to control the bot and set `OWNER_USER_ID`. The owner may be one of the authorized participants or a different user. Only this ID can use controls, and only in the configured channel.
+6. Copy the ID of the person allowed to control the bot and set `OWNER_USER_ID`. The owner may be one of the authorized participants or a different user. Only this ID can use controls: slash commands in the configured channel and owner commands in direct messages. Other allowlisted participants can submit private feedback by DM.
 
 This repository does not guess IDs from the supplied usernames.
 
@@ -60,7 +60,9 @@ Open `.env` in your editor and fill all blank values. Do not overwrite an existi
 | `DISCORD_GUILD_ID` | Numeric server ID |
 | `DISCORD_CHANNEL_ID` | Numeric text-channel ID |
 | `ALLOWED_USER_IDS` | One or more positive numeric IDs, comma-separated; duplicates are deduplicated |
-| `OWNER_USER_ID` | Numeric control owner ID |
+| `OWNER_USER_ID` | Numeric control owner ID; also receives private participant feedback reports |
+| `SYSTEM_PROMPT_PATH` | Public prompt UTF-8 path; default `system_prompt.txt` |
+| `FEEDBACK_PROMPT_PATH` | Independent feedback prompt UTF-8 path; default `feedback_prompt.txt`; restart after changes |
 | `GEMINI_API_KEY` | AI Studio API key; secret |
 | `GEMINI_MODEL` | Default `gemini-flash-latest`; override as needed |
 | `SCAN_INTERVAL_SECONDS` | Default `30`; initial/fallback seconds, clamped to min/max |
@@ -90,3 +92,5 @@ No live API calls are part of the offline tests. You must supply real secrets an
 
 
 For a private custom prompt, set `SYSTEM_PROMPT_PATH` to an external UTF-8 file or ignored `system_prompt.local.txt`. See the [README](../README.md#customize-the-prompt).
+
+Allowlisted participant DMs use a separate delayed feedback conversation. No additional Discord intents are required. The owner must be able to receive bot DMs; undelivered reports are stored and retried. Keep `private_data/` on persistent storage alongside `state.json`. See [participant feedback](../README.md#participant-feedback-dms) for prompt customization.

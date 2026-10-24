@@ -373,6 +373,7 @@ class GeminiTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             prompt = Path(directory) / 'custom.txt'
             prompt.write_text('local prompt', encoding='utf-8')
+            (Path(directory) / 'feedback_prompt.txt').write_text('feedback prompt', encoding='utf-8')
             with patch.dict('os.environ', {'SYSTEM_PROMPT_PATH': 'custom.txt'}), patch('bot.ROOT', Path(directory)), patch('bot.genai.Client'):
                 self.assertEqual(Gemini(CFG).prompt, 'local prompt')
 

@@ -44,6 +44,22 @@ Manual posts do not advance the automatic cursor. Before generating a targeted r
 
 Instructions are supplied separately from public conversation with a model instruction to follow them naturally and keep the private control exchange out of its reply. Instruction bodies are not logged or copied into channel context by the application. They are sent to Gemini, including on the cautious search fallback, and persistent directions are plaintext in the ignored local state file. Model-generated wording still requires judgment; separation of inputs is not a guarantee about every possible generated response.
 
+## Participant feedback
+
+All text DMs from a non-owner in `ALLOWED_USER_IDS` enter a separate feedback conversation. Other users, bots, group DMs, and server messages do not. Owner DMs retain their command behavior. Even command-shaped participant messages are feedback, not controls. Attachment-only DMs receive a request for text; attachments are not downloaded. There is no first-message sharing notice or immediate routine receipt.
+
+The private feedback persona comes from `FEEDBACK_PROMPT_PATH`, defaulting to `feedback_prompt.txt`. This prompt is independent of the public prompt and loaded once at startup with the same UTF-8/path rules. Use ignored `feedback_prompt.local.txt` or a file under `private_data` for private customization. Invalid paths fail startup. Restart to load edits. Runtime instructions keep participant text separate from privileged controls; feedback cannot implement changes or invoke public sends. Feedback requests use no search tool, public history, or owner standing/pending directions.
+
+Each participant has an independent adaptive heartbeat with the existing scan fallback/minimum/maximum settings. The first message schedules a reply after the current delay. Additional messages inform subsequent pacing and join the batch without extending its deadline. One response covers the pending batch using the latest 20 private messages; new messages arriving during generation wait for a subsequent delayed batch. Public pacing and pause status do not affect feedback. A scheduler checks deadlines approximately once per second; generation and Discord latency add to the wait.
+
+SQLite storage at `private_data/feedback.sqlite3` keeps recent conversation history, pending submissions/deadlines, submission-ID deduplication records, and an owner-report outbox. Records are isolated by configured guild, channel, owner, and participant. This does not change the existing shared public `state.json`. Keep one process per configuration; concurrent replicas are unsupported. Histories retain the latest 20 completed/pending conversation messages after each completed batch, without removing pending submissions. Unsent reports remain until confirmed delivered. Submission IDs are retained to prevent replay after history pruning.
+
+Each submitted message is saved and reported immediately to the owner with its original text, sender identity, scope, timestamp, and submission ID. Later the generated response and delivery outcome are reported against all submission IDs in its batch. Mentions are disabled and long reports are split. Do not change the feedback persona to promise implementation or successful forwarding: neither is implied by receiving feedback. When forwarding remains pending at reply time, the application adds a short status sentence.
+
+Owner delivery retries after 60 seconds on failure and remembers the last confirmed chunk across restarts. A crash between Discord acceptance and saving progress can duplicate a report chunk; submission IDs identify the exchange. Reports are never posted publicly. A failure to save the submission produces a fixed failure notice instead of claiming receipt. Generation failure/empty output produces a short delayed acknowledgment. Generated replies are persisted before sending; failed or interrupted participant sends are reported to the owner and never automatically repeated, including after restart. Feedback bodies are not written to process logs.
+
+On restart, future pending deadlines remain intact; overdue pending batches are scheduled after the fallback delay to avoid immediate reply bursts. Adaptive pacing relearns independently per participant. Interrupted claimed batches are reported without repeating generation or sends. Shutdown cancels scheduler/generation work before closing storage. A participant removed from the allowlist receives no further scheduled feedback replies; already queued owner reports remain deliverable.
+
 ## Deploy to a cloud host later
 
 Choose a host supporting an **always-on Python 3.12 background worker** and a **persistent writable disk**. Static hosting and sleeping/request-only web services are unsuitable.
@@ -53,16 +69,16 @@ Choose a host supporting an **always-on Python 3.12 background worker** and a **
 3. Set install/build command to `python -m pip install -r requirements.txt`.
 4. Set start command to `python bot.py`, with the repository root as working directory.
 5. Add all variables in the table through the provider's environment/secret settings. Store both tokens as secrets, never in the repo.
-6. Mount persistent storage at the application directory so `state.json` remains alongside `bot.py`, or choose a deployment layout with that directory on persistent storage. Confirm code updates do not remove the state file. Run exactly one worker replica.
+6. Mount persistent storage at the application directory so `state.json` remains alongside `bot.py`, or choose a deployment layout with that directory on persistent storage. Persist `private_data/` too, including its SQLite database; confirm code updates do not remove state or private feedback data. Run exactly one worker replica.
 7. Allow outbound HTTPS to `generativelanguage.googleapis.com` and Discord API/Gateway access (`discord.com`, `gateway.discord.gg`, and relevant Discord infrastructure). The host must support long-lived Discord WebSockets. No inbound port is required. The bot honors `HTTPS_PROXY` (or `HTTP_PROXY`) for Discord REST and Gateway connections. A proxy-substituted token may authenticate REST but cannot necessarily be substituted inside WebSocket Identify messages: Gateway error `4004` after successful REST login requires checking token delivery. Inject the real bot token directly through the host's secure runtime-secret setting; never print it or put it in a file tracked by Git.
 8. Enable the host's process restart policy. Check logs and repeat the live checks above. Do not delete state during routine deploys; losing it causes a fresh baseline, discarding pending messages.
 
 ## Validation
 
 ```sh
-python -m py_compile bot.py tests/test_bot.py
+python -m py_compile bot.py feedback.py tests/test_bot.py tests/test_private_controls.py tests/test_feedback.py
 python -m pip check
 python -m unittest discover -s tests -v
 ```
 
-The offline suite checks authorization and scope, old-message baselines, ordering, duplicate prevention/restarts, pause/resume and owner controls, context privacy, malformed/partial state, failed writes, generation/send failures, empty responses, cautious search fallback, suppression of automatic grounding source footers, and Discord splitting. It needs no credentials. It cannot establish real Discord permissions, valid IDs/tokens, Gemini model availability, or successful live grounding.
+The offline suite checks authorization and scope, old-message baselines, ordering, duplicate prevention/restarts, pause/resume and owner controls, context privacy, malformed/partial state, failed writes, generation/send failures, empty responses, cautious search fallback, suppression of automatic grounding source footers, and Discord splitting. Feedback tests additionally cover routing, delayed batching, independent pacing, scope isolation, restart recovery, history limits, custom prompts, and delivery retries. It needs no credentials. It cannot establish real Discord permissions, valid IDs/tokens, Gemini model availability, or successful live grounding.
