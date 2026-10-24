@@ -408,10 +408,16 @@ class ChatBot(discord.Client):
 
     async def on_ready(self):
         log.info('Discord connected as bot ID %s', self.user.id)
+        if self.feedback is not None:
+            self.feedback.request_catchup()
         try:
             await self.tree.sync(guild=discord.Object(id=self.config.guild_id))
         except Exception as error:
             log.error('Slash command sync failed (%s); will retry on reconnect', type(error).__name__)
+
+    async def on_resumed(self):
+        if self.feedback is not None:
+            self.feedback.request_catchup()
 
     async def channel(self):
         channel = self.get_channel(self.config.channel_id)

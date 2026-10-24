@@ -12,7 +12,7 @@ from google.genai import types
 
 from bot import AdaptiveHeartbeat, ChatBot, Gemini, State, split_message
 from feedback import FeedbackService, FeedbackStore
-from test_bot import CFG, message
+from test_bot import CFG, Channel, message
 
 
 class FeedbackTests(unittest.IsolatedAsyncioTestCase):
@@ -24,7 +24,7 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.config = replace(CFG, interval=30, min_interval=10, max_interval=90)
         self.store = FeedbackStore(self.path, self.scope)
         self.owner_channel = NS(send=AsyncMock())
-        self.participant_channel = NS(send=AsyncMock())
+        self.participant_channel = NS(send=AsyncMock(), history=Channel([]).history)
         self.owner = NS(create_dm=AsyncMock(return_value=self.owner_channel))
         self.participant = NS(create_dm=AsyncMock(return_value=self.participant_channel))
         self.bot = ChatBot(self.config, State(Path(self.tmp.name) / 'state.json', False),
@@ -310,6 +310,254 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         # Tear down uses a fresh handle because this one was explicitly closed.
         self.store = FeedbackStore(self.path, self.scope)
         self.service = self.make_service()
+
+
+    def setup_inbox(self, messages):
+        self.inbox = Channel(messages)
+        self.participant_channel.history = self.inbox.history
+        self.bot.is_ready = Mock(return_value=True)
+
+    async def test_catchup_imports_offline_dms_once_with_delayed_combined_reply(self):
+        self.setup_inbox([self.dm_message(100, text='first offline suggestion'),
+                          self.dm_message(101, text='second offline suggestion')])
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 101)
+        self.assertEqual(self.deadline(), 1030)
+        await self.service.flush_reports()
+        self.assertEqual(self.owner_channel.send.await_count, 2)
+        self.participant_channel.send.assert_not_awaited()
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        await self.service.flush_reports()
+        self.assertEqual(self.owner_channel.send.await_count, 2)
+        self.now = 1030
+        await self.run_due()
+        self.assertEqual([m['text'] for m in self.bot.gemini.feedback_answer.await_args.args[0]],
+                         ['first offline suggestion', 'second offline suggestion'])
+        self.participant_channel.send.assert_awaited_once()
+
+    async def test_catchup_ignores_bot_owner_and_nontext_messages(self):
+        bot_message = self.dm_message(102, uid=50, text='bot response')
+        bot_message.author.bot = True
+        self.setup_inbox([self.dm_message(100), self.dm_message(101, text=''), bot_message,
+                          self.dm_message(103, uid=30), self.dm_message(104, uid=99)])
+        self.service.request_catchup()
+        self.assertNotIn(30, self.service.catchup_pending)
+        await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 104)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 1)
+        self.dm.send.assert_not_awaited()
+        self.bot.gemini.feedback_answer.assert_not_awaited()
+
+    async def test_catchup_resumes_from_cursor_across_restart(self):
+        self.setup_inbox([self.dm_message(100)])
+        await self.service.catch_up(40)
+        self.store.close()
+        self.store = FeedbackStore(self.path, self.scope)
+        self.service.store = self.store
+        self.inbox.messages.append(self.dm_message(101, text='sent during downtime'))
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 101)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 2)
+        await self.service.flush_reports()
+        self.assertEqual(self.owner_channel.send.await_count, 2)
+
+    async def test_catchup_migrates_from_latest_saved_feedback(self):
+        await self.receive(101, text='already saved')
+        self.setup_inbox([self.dm_message(100, text='old pre-feedback chat'),
+                          self.dm_message(101, text='already saved'), self.dm_message(102, text='new')])
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        await self.service.flush_reports()
+        self.assertEqual(self.store.inbox_cursor(40), 102)
+        self.assertEqual(self.owner_channel.send.await_count, 2)
+        self.assertNotIn('old pre-feedback chat', str(self.owner_channel.send.await_args_list))
+
+    async def test_catchup_failed_save_retries_without_skipping_message(self):
+        self.setup_inbox([self.dm_message(100), self.dm_message(101), self.dm_message(102)])
+        original = self.store.accept
+
+        def fail_second(uid, mid, *args):
+            if mid == 101:
+                raise OSError('private text must not be logged')
+            return original(uid, mid, *args)
+
+        self.service.request_catchup()
+        with patch.object(self.store, 'accept', side_effect=fail_second):
+            await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 100)
+        self.assertEqual(self.service.catchup_pending[40], 1060)
+        self.now = 1030
+        await self.service.tick()
+        self.bot.gemini.feedback_answer.assert_not_awaited()
+        self.now = 1060
+        await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 102)
+        self.assertNotIn(40, self.service.catchup_pending)
+        self.assertGreater(self.deadline(), self.now)
+        await self.service.flush_reports()
+        self.assertEqual(self.owner_channel.send.await_count, 3)
+
+    async def test_catchup_history_failure_does_not_advance_or_repeat_saved_reports(self):
+        self.setup_inbox([self.dm_message(100), self.dm_message(101)])
+        original = self.inbox.history
+
+        async def broken_history(**kwargs):
+            async for m in original(**kwargs):
+                if kwargs.get('oldest_first') and m.id == 101:
+                    raise OSError('history page failed')
+                yield m
+
+        self.participant_channel.history = broken_history
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 100)
+        self.participant_channel.history = original
+        self.now = 1060
+        await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 101)
+        await self.service.flush_reports()
+        self.assertEqual(self.owner_channel.send.await_count, 2)
+
+    async def test_live_arrival_during_catchup_waits_and_is_deduplicated(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        self.setup_inbox([self.dm_message(100), self.dm_message(101)])
+        original = self.inbox.history
+
+        async def slow_history(**kwargs):
+            if kwargs.get('oldest_first'):
+                entered.set()
+                await release.wait()
+            async for m in original(**kwargs):
+                yield m
+
+        self.participant_channel.history = slow_history
+        self.service.request_catchup()
+        catching_up = asyncio.create_task(self.service.catchup_tick())
+        await entered.wait()
+        live = asyncio.create_task(self.receive(101))
+        await asyncio.sleep(0)
+        self.assertFalse(live.done())
+        self.now = 1040
+        await self.service.tick()
+        self.bot.gemini.feedback_answer.assert_not_awaited()
+        release.set()
+        await asyncio.gather(catching_up, live)
+        self.assertEqual(self.store.inbox_cursor(40), 101)
+        self.assertEqual(self.owner_channel.send.await_count, 2)
+        self.assertGreater(self.deadline(), self.now)
+        self.now = self.deadline()
+        await self.run_due()
+        self.bot.gemini.feedback_answer.assert_awaited_once()
+        self.assertEqual(len(self.bot.gemini.feedback_answer.await_args.args[0]), 2)
+
+    async def test_new_arrival_after_snapshot_is_saved_without_skipping_on_next_scan(self):
+        self.setup_inbox([self.dm_message(100)])
+        original = self.inbox.history
+
+        async def growing_history(**kwargs):
+            async for m in original(**kwargs):
+                yield m
+            if kwargs.get('limit') == 1:
+                self.inbox.messages.append(self.dm_message(101))
+
+        self.participant_channel.history = growing_history
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 100)
+        await self.receive(101)
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        await self.service.flush_reports()
+        self.assertEqual(self.store.inbox_cursor(40), 101)
+        self.assertEqual(self.owner_channel.send.await_count, 2)
+
+    async def test_catchup_is_scoped_and_removed_participants_are_not_scanned(self):
+        self.setup_inbox([self.dm_message(100)])
+        self.store.advance_inbox(40, 100)
+        other = FeedbackStore(self.path, 'another:channel:owner')
+        self.assertEqual(other.inbox_cursor(40), 0)
+        other.close()
+        self.service.request_catchup()
+        self.bot.config = replace(self.config, allowed_ids=frozenset({30}))
+        await self.service.catchup_tick()
+        self.assertNotIn(40, self.service.catchup_pending)
+        self.participant.create_dm.assert_not_awaited()
+
+    async def test_catchup_handles_more_than_one_history_page(self):
+        self.setup_inbox([self.dm_message(i, text=f'offline message {i}') for i in range(100, 251)])
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 250)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 151)
+        self.participant_channel.send.assert_not_awaited()
+
+    async def test_failed_checkpoint_does_not_duplicate_reports_on_retry(self):
+        self.setup_inbox([self.dm_message(100), self.dm_message(101)])
+        self.store.advance_inbox(40, 0)
+        self.service.request_catchup()
+        with patch.object(self.store, 'advance_inbox', side_effect=OSError()):
+            await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 0)
+        self.now = 1060
+        await self.service.catchup_tick()
+        await self.service.flush_reports()
+        self.assertEqual(self.store.inbox_cursor(40), 101)
+        self.assertEqual(self.owner_channel.send.await_count, 2)
+
+    async def test_catchup_handles_new_participant_and_history_fetch_failure(self):
+        self.setup_inbox([self.dm_message(100)])
+        self.bot.get_user.return_value = None
+        self.bot.get_user.side_effect = None
+        self.participant.create_dm.side_effect = RuntimeError('cannot open history')
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        self.assertEqual(self.store.inbox_cursor(40), 0)
+        self.assertIn(40, self.service.catchup_pending)
+        self.participant.create_dm.side_effect = None
+        self.now = 1060
+        await self.service.catchup_tick()
+        self.bot.fetch_user.assert_awaited_with(40)
+        self.assertEqual(self.store.inbox_cursor(40), 100)
+
+    async def test_already_scheduled_reply_yields_to_reconnect_catchup(self):
+        await self.receive()
+        self.service.request_catchup()
+        await self.service.respond(40)
+        self.bot.gemini.feedback_answer.assert_not_awaited()
+
+    async def test_gateway_resume_requests_catchup_without_owner_replay(self):
+        self.setup_inbox([])
+        await self.bot.on_resumed()
+        self.assertEqual(set(self.service.catchup_pending), {40})
+        await self.service.catchup_tick()
+        self.assertEqual(self.service.catchup_pending, {})
+        self.bot.gemini.feedback_answer.assert_not_awaited()
+
+    async def test_reconnect_during_scan_requests_another_pass(self):
+        self.setup_inbox([self.dm_message(100)])
+        original = self.inbox.history
+        requested = False
+
+        async def reconnect_history(**kwargs):
+            nonlocal requested
+            async for m in original(**kwargs):
+                yield m
+            if kwargs.get('oldest_first') and not requested:
+                requested = True
+                self.inbox.messages.append(self.dm_message(101))
+                await self.bot.on_resumed()
+
+        self.participant_channel.history = reconnect_history
+        self.service.request_catchup()
+        await self.service.catchup_tick()
+        self.assertIn(40, self.service.catchup_pending)
+        await self.service.catchup_tick()
+        self.assertNotIn(40, self.service.catchup_pending)
+        self.assertEqual(self.store.inbox_cursor(40), 101)
+
 
 
 class FeedbackGeminiTests(unittest.IsolatedAsyncioTestCase):

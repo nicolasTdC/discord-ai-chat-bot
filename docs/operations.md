@@ -60,6 +60,14 @@ Owner delivery retries after 60 seconds on failure and remembers the last confir
 
 On restart, future pending deadlines remain intact; overdue pending batches are scheduled after the fallback delay to avoid immediate reply bursts. Adaptive pacing relearns independently per participant. Interrupted claimed batches are reported without repeating generation or sends. Shutdown cancels scheduler/generation work before closing storage. A participant removed from the allowlist receives no further scheduled feedback replies; already queued owner reports remain deliverable.
 
+### Offline feedback catch-up
+
+On startup, a fresh connection, or a resumed gateway session, the bot opens each allowlisted non-owner participant's DM history and scans chronologically after a saved inbox cursor. Existing installations without a cursor start after that participant's latest saved feedback message. If neither cursor nor saved feedback exists, the first scan imports available DM history. Historical owner commands are never executed. Bot-authored messages, other authors, and attachment-only historical messages advance the cursor without becoming feedback or producing acknowledgment messages.
+
+Inbox cursors persist in the existing feedback SQLite database and share its guild/channel/owner/participant isolation. Each text submission goes through the normal durable save/report path; submission IDs also deduplicate overlap between history scans and live gateway events. The scan checkpoints only after saving or safely ignoring a message. A failed fetch or write retries after 60 seconds, without skipping unsaved messages. Successful scans use a bounded snapshot; arrivals beyond it remain for a live event or the next reconnect scan. Deleted messages and messages Discord cannot return cannot be recovered.
+
+During catch-up, new live feedback for that participant waits until the chronological scan finishes, and scheduled replies are held. This prevents a partial backlog reply or newer live text being inserted ahead of older missed text. A scan failure keeps that participant's replies pending until history recovery succeeds; other participants and public replies remain independent. Imported text joins one delayed batch, reports go to the owner through the normal outbox, and an elapsed reply deadline is moved to one fallback interval after recovery. No immediate startup reply burst occurs. Shutdown stops catch-up work without launching the bot automatically on future edits.
+
 ## Deploy to a cloud host later
 
 Choose a host supporting an **always-on Python 3.12 background worker** and a **persistent writable disk**. Static hosting and sleeping/request-only web services are unsuitable.

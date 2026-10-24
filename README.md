@@ -66,7 +66,7 @@ Instructions and confirmations stay in your DMs, outside the channel conversatio
 
 Allowlisted participants can DM the bot normally to discuss recommendations. The owner continues to use the owner-command interface. Participant messages are saved and forwarded privately to `OWNER_USER_ID`; the bot gives one natural response after a delay, combining messages sent before its timer fires. Feedback cannot execute owner commands or change bot behavior.
 
-Each participant has independent adaptive pacing using the same scan interval/bounds as public replies. Feedback conversations work while public replies are paused, and histories and pending work survive restarts in ignored `private_data/feedback.sqlite3`. Owner reports include the full exchange; undelivered reports retry every 60 seconds. No first-message notice or immediate routine receipt is sent.
+Each participant has independent adaptive pacing using the same scan interval/bounds as public replies. Feedback conversations work while public replies are paused, and histories and pending work survive restarts in ignored `private_data/feedback.sqlite3`. On startup and reconnect, the bot checks allowlisted participants’ DM histories for missed feedback. Saved cursors and submission IDs prevent duplicate processing; replies still wait for the normal timer. On upgrade, catch-up starts after the last saved participant message; a participant with no saved feedback imports available DM history once. Owner commands are never replayed. Owner reports include the full exchange; undelivered reports retry every 60 seconds. No first-message notice or immediate routine receipt is sent.
 
 ### Customize feedback behavior
 
